@@ -3,6 +3,7 @@ import lxml
 import json
 import requests
 import re
+import datetime
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 from selenium import webdriver
@@ -12,6 +13,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
+
+start = datetime.datetime.now()
 
 URL='https://hh.ru/'
 
@@ -60,28 +63,33 @@ def get_data(url, keywords, city, salary_filter):
             keywords_input.send_keys(keywords)
         keywords_input.send_keys(Keys.ENTER)
 
-        filter_button = driver.find_element(By.CLASS_NAME, value='bloko-icon-link')
+        filter_button = driver.find_element(By.CLASS_NAME, 'bloko-icon-link')
         filter_button.click()
-            
-        el = driver.find_element(By.CLASS_NAME, value='supernova-footer-nav-logo')
-        actions.move_to_element(el).click().perform()
 
-        clear_buttons = driver.find_elements(By.CLASS_NAME, value='bloko-tag-button')
+        logo = driver.find_element(By.CLASS_NAME, 'supernova-footer-nav-logo')
+        actions.move_to_element(logo).perform()
+
+        clear_buttons = driver.find_elements(By.CLASS_NAME, 'bloko-tag-button')
         for button in clear_buttons:
             button.click()
             
         if city:               
-            city_input = driver.find_element(By.CSS_SELECTOR, value='input[data-qa=resumes-search-region-add]')
+            city_input = driver.find_element(By.CSS_SELECTOR, 'input[data-qa="resumes-search-region-add"]')
             city_input.send_keys(city)
 
             time.sleep(2)
 
         if salary_filter:
-            salary_input = driver.find_element(By.CSS_SELECTOR, value='input[data-qa=vacancysearch__compensation-input]')
+            salary_input = driver.find_element(By.CSS_SELECTOR, 'input[data-qa="vacancysearch__compensation-input"]')
             salary_input.send_keys(salary_filter)
 
-            checkbox = driver.find_element(By.XPATH, '//span[contains(text(), "Показывать только вакансии")]')
-            checkbox.click()
+            salary_checkbox = driver.find_element(By.XPATH, '//span[contains(text(), "Показывать только вакансии")]')
+            salary_checkbox.click()
+
+        vacancy_on_page = driver.find_element(By.CSS_SELECTOR, 'label[data-qa="control-search__items-on-page control-search__items-on-page_100"]')
+        vacancy_checkbox = vacancy_on_page.find_element(By.TAG_NAME, 'span')
+        actions.move_to_element(logo).perform()
+        vacancy_checkbox.click()
 
         submit_button = driver.find_element(value='submit-bottom')
         submit_button.click()
@@ -92,7 +100,7 @@ def get_data(url, keywords, city, salary_filter):
             html_list.append(driver.page_source)
             page_range[0] += 1
             page_range[1] += 1
-            next_page = driver.find_elements(By.CSS_SELECTOR, value=f'span[data-qa=pager-page-wrapper-{page_range[0]}-{page_range[1]}]')
+            next_page = driver.find_elements(By.CSS_SELECTOR, value=f'span[data-qa="pager-page-wrapper-{page_range[0]}-{page_range[1]}"]')
             if next_page:
                 actions.move_to_element(next_page[0]).click().perform()
                 time.sleep(1)
@@ -137,6 +145,7 @@ def parse(html, currency, dollar_rate):
             else:
                 vacancy_list.append(vacancy)
     objects = { 'vacancies': vacancy_list }
+    print(f'[INFO] Количество страниц: {len(html)}')
     print(f'[INFO] Количество вакансий: {len(vacancy_list)}')
     with open('vacancies.json', 'w', encoding='utf-8') as file:
         json.dump(objects, file, indent=4, ensure_ascii=False)
@@ -178,6 +187,7 @@ def main():
         dollar_rate = None
     html_list = get_data(url=URL, keywords=params['keywords'], city=params['city'], salary_filter=params['salary_filter'])
     parse(html=html_list, dollar_rate=dollar_rate, currency=params['currency'])
+    print(f'[INFO] Complete time: {datetime.datetime.now() - start}')
 
 
 if __name__ == '__main__':
