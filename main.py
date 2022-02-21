@@ -4,6 +4,8 @@ import json
 import requests
 import re
 import datetime
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 from selenium import webdriver
@@ -14,47 +16,55 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
 
-start = datetime.datetime.now()
 
 URL='https://hh.ru/'
+search_url = []
+vacancy_list = {'vacancies': []}
+
 
 def get_params():
+
+    """Get params from user"""
+
     params = {}
     params['keywords'] = input('Введите ключевые слова для поиска: ').capitalize()
     params['city'] = input('Введите город: ').capitalize()
+
     while True:
         params['currency'] = input('Введите валюту (RUB, USD): ').upper()
         currency_check = re.match(r'(USD|RUB)', params['currency'])
         if currency_check is not None or params['currency'] == '':
             break
-        print('[INFO] Недопустимый ввод')
+        print('[INFO] Invalid input')
+
     while True:
         params['salary_filter'] = input('Введите минимальную желаемую зарплату в рублях: ')
         salary_filter_check = re.match(r'^\d+$', params['salary_filter'])
         if salary_filter_check is not None or params['salary_filter'] == '':
             break
-        print('[INFO] Недопустимый ввод')
+        print('[INFO] Invalid input')
+
     for key in params:
         if params[key] == '':
             params[key] = None
     return params
 
-def get_data(url, keywords, city, salary_filter):
-    user_agent = UserAgent()
+def set_params(url, keywords, city, salary_filter):
+
+    """Applying parameters"""
 
     service = Service(ChromeDriverManager().install())
 
     options = ChromeOptions()
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    options.add_argument(f'user-agent={user_agent.random}')
+    options.add_argument(f'user-agent={UserAgent().random}')
     options.add_argument('--headless')
 
     driver = webdriver.Chrome(service=service, options=options)
     driver.implicitly_wait(10)
-    
-    page_range = [1, 0]
+
     actions = ActionChains(driver)
-    html_list = []
+
     try:
         driver.get(url=url)
 
@@ -72,7 +82,7 @@ def get_data(url, keywords, city, salary_filter):
         clear_buttons = driver.find_elements(By.CLASS_NAME, 'bloko-tag-button')
         for button in clear_buttons:
             button.click()
-            
+
         if city:               
             city_input = driver.find_element(By.CSS_SELECTOR, 'input[data-qa="resumes-search-region-add"]')
             city_input.send_keys(city)
@@ -86,7 +96,7 @@ def get_data(url, keywords, city, salary_filter):
             salary_checkbox = driver.find_element(By.XPATH, '//span[contains(text(), "Показывать только вакансии")]')
             salary_checkbox.click()
 
-        vacancy_on_page = driver.find_element(By.CSS_SELECTOR, 'label[data-qa="control-search__items-on-page control-search__items-on-page_100"]')
+        vacancy_on_page = driver.find_element(By.CSS_SELECTOR, 'label[data-qa="control-search__items-on-page control-search__items-on-page_20"]')
         vacancy_checkbox = vacancy_on_page.find_element(By.TAG_NAME, 'span')
         actions.move_to_element(logo).perform()
         vacancy_checkbox.click()
@@ -95,38 +105,40 @@ def get_data(url, keywords, city, salary_filter):
         submit_button.click()
 
         time.sleep(2)
-            
-        while True:
-            html_list.append(driver.page_source)
-            page_range[0] += 1
-            page_range[1] += 1
-            next_page = driver.find_elements(By.CSS_SELECTOR, value=f'span[data-qa="pager-page-wrapper-{page_range[0]}-{page_range[1]}"]')
-            if next_page:
-                actions.move_to_element(next_page[0]).click().perform()
-                time.sleep(1)
-            else:
-                break           
+
+        search_url.append(driver.current_url)
+
+        page_quantity = driver.find_elements(By.CSS_SELECTOR, 'a[data-qa="pager-page"]')
+        max_page = page_quantity[-1].find_element(By.TAG_NAME, 'span').text
+
     except Exception as e:
         print(e)
+
     finally:
         driver.close()
         driver.quit()
-        return html_list
+        return max_page
 
 
-def parse(html, currency, dollar_rate):
-    vacancy_list = []
-    for page in html:
-        bs = BeautifulSoup(page, 'lxml')
-        titles = bs.find_all('div', class_='vacancy-serp-item vacancy-serp-item_redesigned')
+async def parse(session, page, currency, dollar_rate):
+
+    """Get vacancies"""
+
+    current_url = search_url[0] + f'&page={page}'
+    headers = {
+        'user-agent': UserAgent().random
+    }
+    async with session.get(url=current_url, headers=headers) as response:
+        resp = await response.text()
+
+        bs = BeautifulSoup(resp, 'lxml')
+
+        titles = bs.find_all(attrs={'data-qa': re.compile('^vacancy-serp__vacancy vacancy-serp__vacancy_')})
         for el in titles:
             a = el.find(attrs={'data-qa': 'vacancy-serp__vacancy-title'})
             salary = el.find(attrs={'data-qa': 'vacancy-serp__vacancy-compensation'})
-            if currency:
-                salary = salary_format(salary, currency, dollar_rate)
-            else:
-                salary = salary.text.replace('\u202f', '')
-            placement_date = el.find(attrs={'data-qa': 'vacancy-serp__vacancy-date'})
+            salary = salary_format(salary, currency, dollar_rate)
+            placement_date = el.find(attrs={'class': 'vacancy-serp-item__publication-date vacancy-serp-item__publication-date_short'})
             company = el.find(attrs={'data-qa': 'vacancy-serp__vacancy-employer'})
             if company is None:
                 company = el.find(attrs={'class': 'vacancy-serp-item__meta-info-company'})  
@@ -140,17 +152,16 @@ def parse(html, currency, dollar_rate):
                 'remote': remote if remote else 'Работа в офисе',
                 'placement date': placement_date.text if placement_date else 'Не указано'
             }
-            if vacancy in vacancy_list:
+            if vacancy in vacancy_list['vacancies']:
                 continue
             else:
-                vacancy_list.append(vacancy)
-    objects = { 'vacancies': vacancy_list }
-    print(f'[INFO] Количество страниц: {len(html)}')
-    print(f'[INFO] Количество вакансий: {len(vacancy_list)}')
-    with open('vacancies.json', 'w', encoding='utf-8') as file:
-        json.dump(objects, file, indent=4, ensure_ascii=False)
+                vacancy_list['vacancies'].append(vacancy)
+
 
 def salary_format(salary, currency, dollar_rate):
+
+    """Convert salary"""
+
     if salary:
         salary = salary.text.replace('\u202f', '')
         numbers = re.findall('\d+', salary)
@@ -169,26 +180,61 @@ def salary_format(salary, currency, dollar_rate):
         return 'Не указана'
 
 def get_dollar_exchange_rate():
+
+    """Get dollars rate"""
+
     response = requests.get('https://www.google.com/'
                             'search?q=%D0%BA%D1%83%D1%80%D1%81+%D0%B4%D0%BE%D0%BB%D0%BB%D0%B0%D1%80%D0%B0&oq=%D0%BA%D1%83%D1%80%D1%81+%D0%B4%D0%BE%D0%BB%D0%BB%D0%B0&'
                             'aqs=chrome.0.0i131i433i512j69i57j0i131i433i512l4j0i512j0i433i512j0i512j0i131i433i512.4128j1j7&sourceid=chrome&ie=UTF-8')
+
     bs = BeautifulSoup(response.text, 'lxml')
+
     el = bs.find(attrs={'class': 'BNeawe iBp4i AP7Wnd'})
+
     result = re.match(r'\d+,\d+', el.text).group()
     result = float(result.replace(',', '.'))
-    print('[INFO] Dollar rate: ' + str(result))
     return result
-    
+
+
+async def create_tasks(max_page, dollar_rate, currency):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        
+        for page in range(int(max_page)):
+            task = asyncio.create_task(parse(session, page, dollar_rate=dollar_rate, currency=currency))
+            tasks.append(task)
+
+        await asyncio.gather(*tasks)
+
+def write_json():
+
+    """Writing vacancies to json file"""
+
+    with open('vacancies.json', 'w', encoding='utf-8') as file:
+        json.dump(vacancy_list, file, indent=4, ensure_ascii=False)
+
+
 def main():
+    start = datetime.datetime.now()
+
     params = get_params()
     if params['currency']:
         dollar_rate = get_dollar_exchange_rate()
     else:
         dollar_rate = None
-    html_list = get_data(url=URL, keywords=params['keywords'], city=params['city'], salary_filter=params['salary_filter'])
-    parse(html=html_list, dollar_rate=dollar_rate, currency=params['currency'])
-    print(f'[INFO] Complete time: {datetime.datetime.now() - start}')
 
+    max_page = set_params(url=URL, keywords=params['keywords'], city=params['city'], salary_filter=params['salary_filter'])
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(create_tasks(max_page, dollar_rate, params['currency']))
+
+    write_json()
+
+    print(f'[INFO] Dollar rate: ' + str(dollar_rate))
+    print(f'[INFO] Number of vacancies: ' + str(len(vacancy_list['vacancies'])))
+    print(f'[INFO] Lead time: ' + str(datetime.datetime.now() - start))
+    
 
 if __name__ == '__main__':
     main()
